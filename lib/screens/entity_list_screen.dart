@@ -1,252 +1,245 @@
 import 'package:flutter/material.dart';
-import 'package:provider/provider.dart';
-import 'package:cached_network_image/cached_network_image.dart';
-import '../providers/landmark_provider.dart';
-import '../models/landmark.dart';
-import 'form_screen.dart';
+import 'package:geo_entities_app/models/entity.dart';
+import 'package:geo_entities_app/services/api_service.dart';
+import 'package:geo_entities_app/screens/entity_form_screen.dart';
 
-class ListScreen extends StatelessWidget {
-  const ListScreen({super.key});
+class EntityListScreen extends StatefulWidget {
+  final bool showAppBar;
+  
+  const EntityListScreen({super.key, this.showAppBar = true});
 
   @override
-  Widget build(BuildContext context) {
-    return Scaffold(
-      appBar: AppBar(
-        title: const Text('Landmark Records'),
-        actions: [
-          Consumer<LandmarkProvider>(
-            builder: (context, provider, child) {
-              if (provider.isOfflineMode) {
-                return const Padding(
-                  padding: EdgeInsets.symmetric(horizontal: 16),
-                  child: Icon(Icons.cloud_off, size: 20),
-                );
-              }
-              return const SizedBox.shrink();
-            },
-          ),
-          IconButton(
-            icon: const Icon(Icons.refresh),
-            onPressed: () {
-              Provider.of<LandmarkProvider>(context, listen: false)
-                  .fetchLandmarks(forceRefresh: true);
-            },
-          ),
-        ],
-      ),
-      body: Consumer<LandmarkProvider>(
-        builder: (context, provider, child) {
-          if (provider.isLoading && provider.landmarks.isEmpty) {
-            return const Center(child: CircularProgressIndicator());
-          }
+  State<EntityListScreen> createState() => _EntityListScreenState();
+}
 
-          if (provider.error != null && provider.landmarks.isEmpty) {
-            return Center(
-              child: Column(
-                mainAxisAlignment: MainAxisAlignment.center,
-                children: [
-                  const Icon(Icons.error_outline, size: 60, color: Colors.red),
-                  const SizedBox(height: 16),
-                  Padding(
-                    padding: const EdgeInsets.symmetric(horizontal: 32),
-                    child: Text(
-                      provider.error!,
-                      textAlign: TextAlign.center,
-                      style: const TextStyle(fontSize: 16),
-                    ),
-                  ),
-                  const SizedBox(height: 16),
-                  ElevatedButton(
-                    onPressed: () => provider.fetchLandmarks(),
-                    child: const Text('Retry'),
-                  ),
-                ],
-              ),
-            );
-          }
+class _EntityListScreenState extends State<EntityListScreen> {
+  final ApiService _apiService = ApiService();
+  final ScrollController _scrollController = ScrollController();
 
-          if (provider.landmarks.isEmpty) {
-            return const Center(
-              child: Column(
-                mainAxisAlignment: MainAxisAlignment.center,
-                children: [
-                  Icon(Icons.location_off, size: 60, color: Colors.grey),
-                  SizedBox(height: 16),
-                  Text(
-                    'No landmarks found',
-                    style: TextStyle(fontSize: 18, color: Colors.grey),
-                  ),
-                  SizedBox(height: 8),
-                  Text(
-                    'Add a new landmark using the New Entry tab',
-                    style: TextStyle(fontSize: 14, color: Colors.grey),
-                  ),
-                ],
-              ),
-            );
-          }
+  List<Entity> _entities = [];
+  bool _isLoading = true;
 
-          return Column(
-            children: [
-              // Offline mode banner
-              if (provider.isOfflineMode)
-                Container(
-                  color: Colors.orange,
-                  padding: const EdgeInsets.all(8),
-                  child: const Row(
-                    mainAxisAlignment: MainAxisAlignment.center,
-                    children: [
-                      Icon(Icons.cloud_off, color: Colors.white, size: 16),
-                      SizedBox(width: 8),
-                      Text(
-                        'Offline Mode - Showing cached data',
-                        style: TextStyle(color: Colors.white),
-                      ),
-                    ],
-                  ),
-                ),
-              
-              // List of landmarks
-              Expanded(
-                child: RefreshIndicator(
-                  onRefresh: () => provider.fetchLandmarks(forceRefresh: true),
-                  child: ListView.builder(
-                    padding: const EdgeInsets.all(16),
-                    itemCount: provider.landmarks.length,
-                    itemBuilder: (context, index) {
-                      final landmark = provider.landmarks[index];
-                      return _LandmarkCard(
-                        landmark: landmark,
-                        onEdit: () {
-                          Navigator.push(
-                            context,
-                            MaterialPageRoute(
-                              builder: (context) => FormScreen(
-                                landmarkToEdit: landmark,
-                              ),
-                            ),
-                          );
-                        },
-                        onDelete: () => _deleteLandmark(context, landmark),
-                      );
-                    },
-                  ),
-                ),
-              ),
-            ],
-          );
-        },
-      ),
-    );
+  @override
+  void initState() {
+    super.initState();
+    _fetchEntities();
   }
 
-  void _deleteLandmark(BuildContext context, Landmark landmark) {
-    showDialog(
+  @override
+  void dispose() {
+    _scrollController.dispose();
+    super.dispose();
+  }
+
+  Future<void> _fetchEntities() async {
+    setState(() {
+      _isLoading = true;
+    });
+    
+    try {
+      final entities = await _apiService.getEntities();
+      if (mounted) {
+        setState(() {
+          _entities = entities;
+          _isLoading = false;
+        });
+      }
+    } catch (e) {
+      if (mounted) {
+        setState(() {
+          _isLoading = false;
+        });
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Error: $e')),
+        );
+      }
+    }
+  }
+
+  Future<void> _deleteEntity(int? id, int index) async {
+    if (id == null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Invalid entity id')),
+      );
+      return;
+    }
+
+    final confirmed = await showDialog<bool>(
       context: context,
       builder: (context) => AlertDialog(
         title: const Text('Delete Landmark'),
-        content: Text('Are you sure you want to delete "${landmark.title}"?'),
+        content: Text('Are you sure you want to delete "${_entities[index].title}"?'),
         actions: [
           TextButton(
-            onPressed: () => Navigator.pop(context),
+            onPressed: () => Navigator.of(context).pop(false),
             child: const Text('Cancel'),
           ),
-          TextButton(
-            onPressed: () async {
-              Navigator.pop(context);
-              final provider = Provider.of<LandmarkProvider>(context, listen: false);
-              final success = await provider.deleteLandmark(landmark.id!);
-              
-              if (context.mounted) {
-                ScaffoldMessenger.of(context).showSnackBar(
-                  SnackBar(
-                    content: Text(
-                      success
-                          ? 'Landmark deleted successfully'
-                          : 'Failed to delete landmark',
-                    ),
-                    backgroundColor: success ? Colors.green : Colors.red,
-                  ),
-                );
-              }
-            },
-            child: const Text('Delete', style: TextStyle(color: Colors.red)),
+          ElevatedButton(
+            onPressed: () => Navigator.of(context).pop(true),
+            style: ElevatedButton.styleFrom(
+              backgroundColor: Colors.red,
+              foregroundColor: Colors.white,
+            ),
+            child: const Text('Delete'),
           ),
         ],
       ),
     );
+
+    if (confirmed != true) return;
+
+    try {
+      await _apiService.deleteEntity(id);
+      if (!mounted) return;
+      
+      setState(() {
+        _entities.removeAt(index);
+      });
+      
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Deleted successfully')),
+      );
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Delete failed: $e')),
+        );
+      }
+    }
   }
-}
 
-class _LandmarkCard extends StatelessWidget {
-  final Landmark landmark;
-  final VoidCallback onEdit;
-  final VoidCallback onDelete;
+  Future<void> _scrollToEnd() async {
+    if (_isLoading) {
+      await Future.delayed(const Duration(milliseconds: 150));
+    }
 
-  const _LandmarkCard({
-    required this.landmark,
-    required this.onEdit,
-    required this.onDelete,
-  });
+    if (!_scrollController.hasClients) {
+      WidgetsBinding.instance.addPostFrameCallback((_) => _scrollToEnd());
+      return;
+    }
+
+    final maxScroll = _scrollController.position.maxScrollExtent;
+    final current = _scrollController.offset;
+    final distance = (maxScroll - current).abs();
+
+    if (distance <= 5) return;
+
+    final int durationMs = ((distance / 1000) * 900).clamp(300, 1400).toInt();
+
+    await _scrollController.animateTo(
+      maxScroll,
+      duration: Duration(milliseconds: durationMs),
+      curve: Curves.easeInOut,
+    );
+  }
 
   @override
   Widget build(BuildContext context) {
+    final body = _isLoading
+        ? const Center(child: CircularProgressIndicator())
+        : _entities.isEmpty
+            ? Center(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    const Icon(Icons.inbox, size: 64, color: Colors.grey),
+                    const SizedBox(height: 16),
+                    const Text('No landmarks found'),
+                    const SizedBox(height: 12),
+                    ElevatedButton.icon(
+                      onPressed: _fetchEntities,
+                      icon: const Icon(Icons.refresh),
+                      label: const Text('Retry'),
+                    ),
+                  ],
+                ),
+              )
+            : RefreshIndicator(
+                onRefresh: _fetchEntities,
+                child: ListView.builder(
+                  controller: _scrollController,
+                  padding: const EdgeInsets.all(8),
+                  itemCount: _entities.length,
+                  itemBuilder: (context, index) {
+                    final entity = _entities[index];
+                    return _buildEntityCard(entity, index);
+                  },
+                ),
+              );
+
+    if (!widget.showAppBar) {
+      return body;
+    }
+
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('Entity List'),
+        actions: [
+          IconButton(
+            icon: const Icon(Icons.arrow_downward),
+            tooltip: 'Scroll to end',
+            onPressed: _scrollToEnd,
+          ),
+          IconButton(
+            icon: const Icon(Icons.refresh),
+            tooltip: 'Refresh',
+            onPressed: _fetchEntities,
+          ),
+        ],
+      ),
+      body: body,
+    );
+  }
+
+  Widget _buildEntityCard(Entity entity, int index) {
+    final imageUrl = _apiService.getFullImageUrl(entity.image);
+    
     return Dismissible(
-      key: Key(landmark.id.toString()),
+      key: Key('entity_${entity.id}_$index'),
       background: Container(
-        margin: const EdgeInsets.only(bottom: 16),
-        decoration: BoxDecoration(
-          color: Colors.blue,
-          borderRadius: BorderRadius.circular(12),
-        ),
         alignment: Alignment.centerLeft,
         padding: const EdgeInsets.only(left: 20),
-        child: const Column(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            Icon(Icons.edit, color: Colors.white),
-            SizedBox(height: 4),
-            Text('Edit', style: TextStyle(color: Colors.white)),
-          ],
-        ),
+        color: Colors.blue,
+        child: const Icon(Icons.edit, color: Colors.white, size: 32),
       ),
       secondaryBackground: Container(
-        margin: const EdgeInsets.only(bottom: 16),
-        decoration: BoxDecoration(
-          color: Colors.red,
-          borderRadius: BorderRadius.circular(12),
-        ),
         alignment: Alignment.centerRight,
         padding: const EdgeInsets.only(right: 20),
-        child: const Column(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            Icon(Icons.delete, color: Colors.white),
-            SizedBox(height: 4),
-            Text('Delete', style: TextStyle(color: Colors.white)),
-          ],
-        ),
+        color: Colors.red,
+        child: const Icon(Icons.delete, color: Colors.white, size: 32),
       ),
       confirmDismiss: (direction) async {
         if (direction == DismissDirection.startToEnd) {
           // Swipe right - Edit
-          onEdit();
-          return false;
+          final result = await Navigator.push(
+            context,
+            MaterialPageRoute(
+              builder: (context) => EntityFormScreen(entity: entity),
+            ),
+          );
+          if (result == true) {
+            _fetchEntities();
+          }
+          return false; // Don't dismiss
         } else {
           // Swipe left - Delete
-          return await showDialog(
+          return await showDialog<bool>(
             context: context,
             builder: (context) => AlertDialog(
-              title: const Text('Confirm Delete'),
-              content: Text('Delete "${landmark.title}"?'),
+              title: const Text('Delete Landmark'),
+              content: Text('Delete "${entity.title}"?'),
               actions: [
                 TextButton(
                   onPressed: () => Navigator.pop(context, false),
                   child: const Text('Cancel'),
                 ),
-                TextButton(
+                ElevatedButton(
                   onPressed: () => Navigator.pop(context, true),
-                  child: const Text('Delete', style: TextStyle(color: Colors.red)),
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: Colors.red,
+                    foregroundColor: Colors.white,
+                  ),
+                  child: const Text('Delete'),
                 ),
               ],
             ),
@@ -255,70 +248,46 @@ class _LandmarkCard extends StatelessWidget {
       },
       onDismissed: (direction) {
         if (direction == DismissDirection.endToStart) {
-          onDelete();
+          _deleteEntity(entity.id, index);
         }
       },
       child: Card(
-        margin: const EdgeInsets.only(bottom: 16),
         elevation: 2,
+        margin: const EdgeInsets.symmetric(vertical: 6, horizontal: 4),
         shape: RoundedRectangleBorder(
           borderRadius: BorderRadius.circular(12),
         ),
         child: InkWell(
-          onTap: () {
-            // Show details dialog
-            showDialog(
-              context: context,
-              builder: (context) => _LandmarkDetailDialog(landmark: landmark),
-            );
-          },
+          onTap: () => _showEntityDetails(entity),
           borderRadius: BorderRadius.circular(12),
           child: Padding(
             padding: const EdgeInsets.all(12),
             child: Row(
-              crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                // Image
+                // Image thumbnail
                 ClipRRect(
                   borderRadius: BorderRadius.circular(8),
-                  child: landmark.fullImageUrl != null
-                      ? CachedNetworkImage(
-                          imageUrl: landmark.fullImageUrl!,
+                  child: imageUrl.isNotEmpty
+                      ? Image.network(
+                          imageUrl,
                           width: 80,
                           height: 80,
                           fit: BoxFit.cover,
-                          placeholder: (context, url) => Container(
-                            width: 80,
-                            height: 80,
-                            color: Colors.grey[300],
-                            child: const Center(
-                              child: CircularProgressIndicator(),
-                            ),
-                          ),
-                          errorWidget: (context, url, error) => Container(
-                            width: 80,
-                            height: 80,
-                            color: Colors.grey[300],
-                            child: const Icon(Icons.image_not_supported),
-                          ),
+                          errorBuilder: (context, error, stackTrace) =>
+                              _buildPlaceholderImage(),
                         )
-                      : Container(
-                          width: 80,
-                          height: 80,
-                          color: Colors.grey[300],
-                          child: const Icon(Icons.image, size: 40),
-                        ),
+                      : _buildPlaceholderImage(),
                 ),
                 
-                const SizedBox(width: 12),
+                const SizedBox(width: 16),
                 
-                // Details
+                // Title and location
                 Expanded(
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
                       Text(
-                        landmark.title,
+                        entity.title,
                         style: const TextStyle(
                           fontSize: 16,
                           fontWeight: FontWeight.bold,
@@ -333,24 +302,16 @@ class _LandmarkCard extends StatelessWidget {
                           const SizedBox(width: 4),
                           Expanded(
                             child: Text(
-                              '${landmark.lat.toStringAsFixed(4)}, ${landmark.lon.toStringAsFixed(4)}',
+                              '${entity.lat.toStringAsFixed(4)}, ${entity.lon.toStringAsFixed(4)}',
                               style: TextStyle(
-                                color: Colors.grey[600],
                                 fontSize: 13,
+                                color: Colors.grey[600],
                               ),
                               maxLines: 1,
                               overflow: TextOverflow.ellipsis,
                             ),
                           ),
                         ],
-                      ),
-                      const SizedBox(height: 4),
-                      Text(
-                        'ID: ${landmark.id}',
-                        style: TextStyle(
-                          color: Colors.grey[500],
-                          fontSize: 12,
-                        ),
                       ),
                     ],
                   ),
@@ -361,18 +322,23 @@ class _LandmarkCard extends StatelessWidget {
                   children: [
                     IconButton(
                       icon: const Icon(Icons.edit, size: 20),
-                      color: Colors.blue,
-                      onPressed: onEdit,
-                      padding: EdgeInsets.zero,
-                      constraints: const BoxConstraints(),
+                      onPressed: () async {
+                        final result = await Navigator.push(
+                          context,
+                          MaterialPageRoute(
+                            builder: (context) => EntityFormScreen(entity: entity),
+                          ),
+                        );
+                        if (result == true) {
+                          _fetchEntities();
+                        }
+                      },
+                      tooltip: 'Edit',
                     ),
-                    const SizedBox(height: 8),
                     IconButton(
-                      icon: const Icon(Icons.delete, size: 20),
-                      color: Colors.red,
-                      onPressed: onDelete,
-                      padding: EdgeInsets.zero,
-                      constraints: const BoxConstraints(),
+                      icon: const Icon(Icons.delete, size: 20, color: Colors.red),
+                      onPressed: () => _deleteEntity(entity.id, index),
+                      tooltip: 'Delete',
                     ),
                   ],
                 ),
@@ -383,122 +349,72 @@ class _LandmarkCard extends StatelessWidget {
       ),
     );
   }
-}
 
-class _LandmarkDetailDialog extends StatelessWidget {
-  final Landmark landmark;
+  Widget _buildPlaceholderImage() {
+    return Container(
+      width: 80,
+      height: 80,
+      color: Colors.grey[200],
+      child: const Icon(Icons.image_not_supported, size: 40, color: Colors.grey),
+    );
+  }
 
-  const _LandmarkDetailDialog({required this.landmark});
-
-  @override
-  Widget build(BuildContext context) {
-    return Dialog(
-      shape: RoundedRectangleBorder(
-        borderRadius: BorderRadius.circular(16),
-      ),
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          // Image
-          if (landmark.fullImageUrl != null)
-            ClipRRect(
-              borderRadius: const BorderRadius.vertical(top: Radius.circular(16)),
-              child: CachedNetworkImage(
-                imageUrl: landmark.fullImageUrl!,
-                height: 200,
-                fit: BoxFit.cover,
-                placeholder: (context, url) => Container(
-                  height: 200,
-                  color: Colors.grey[300],
-                  child: const Center(child: CircularProgressIndicator()),
-                ),
-                errorWidget: (context, url, error) => Container(
-                  height: 200,
-                  color: Colors.grey[300],
-                  child: const Icon(Icons.image_not_supported, size: 60),
-                ),
-              ),
-            ),
-          
-          Padding(
-            padding: const EdgeInsets.all(20),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  landmark.title,
-                  style: const TextStyle(
-                    fontSize: 22,
-                    fontWeight: FontWeight.bold,
-                  ),
-                ),
-                const SizedBox(height: 16),
-                _DetailRow(
-                  icon: Icons.tag,
-                  label: 'ID',
-                  value: landmark.id.toString(),
-                ),
-                const SizedBox(height: 8),
-                _DetailRow(
-                  icon: Icons.my_location,
-                  label: 'Latitude',
-                  value: landmark.lat.toStringAsFixed(6),
-                ),
-                const SizedBox(height: 8),
-                _DetailRow(
-                  icon: Icons.my_location,
-                  label: 'Longitude',
-                  value: landmark.lon.toStringAsFixed(6),
-                ),
-                const SizedBox(height: 16),
-                SizedBox(
-                  width: double.infinity,
-                  child: ElevatedButton(
-                    onPressed: () => Navigator.pop(context),
-                    child: const Text('Close'),
-                  ),
+  void _showEntityDetails(Entity entity) {
+    final imageUrl = _apiService.getFullImageUrl(entity.image);
+    
+    showDialog(
+      context: context,
+      builder: (context) => Dialog(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            AppBar(
+              title: Text(entity.title),
+              automaticallyImplyLeading: false,
+              actions: [
+                IconButton(
+                  icon: const Icon(Icons.close),
+                  onPressed: () => Navigator.pop(context),
                 ),
               ],
             ),
-          ),
-        ],
+            if (imageUrl.isNotEmpty)
+              Flexible(
+                child: InteractiveViewer(
+                  child: Image.network(
+                    imageUrl,
+                    fit: BoxFit.contain,
+                    errorBuilder: (context, error, stackTrace) =>
+                        const Center(child: Text('Failed to load image')),
+                  ),
+                ),
+              )
+            else
+              const Padding(
+                padding: EdgeInsets.all(32.0),
+                child: Text('No image available'),
+              ),
+            Padding(
+              padding: const EdgeInsets.all(16.0),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    'Location:',
+                    style: TextStyle(
+                      fontWeight: FontWeight.bold,
+                      color: Colors.grey[700],
+                    ),
+                  ),
+                  const SizedBox(height: 4),
+                  Text('Latitude: ${entity.lat}'),
+                  Text('Longitude: ${entity.lon}'),
+                ],
+              ),
+            ),
+          ],
+        ),
       ),
-    );
-  }
-}
-
-class _DetailRow extends StatelessWidget {
-  final IconData icon;
-  final String label;
-  final String value;
-
-  const _DetailRow({
-    required this.icon,
-    required this.label,
-    required this.value,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    return Row(
-      children: [
-        Icon(icon, size: 20, color: Colors.grey[600]),
-        const SizedBox(width: 8),
-        Text(
-          '$label: ',
-          style: TextStyle(
-            fontWeight: FontWeight.w500,
-            color: Colors.grey[600],
-          ),
-        ),
-        Expanded(
-          child: Text(
-            value,
-            style: const TextStyle(fontWeight: FontWeight.w500),
-          ),
-        ),
-      ],
     );
   }
 }

@@ -1,6 +1,6 @@
 {
-    "name": "login_system",
-    "short_name": "login_system",
+    "name": "lab_exam",
+    "short_name": "lab_exam",
     "start_url": ".",
     "display": "standalone",
     "background_color": "#0175C2",

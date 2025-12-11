@@ -1,46 +1,454 @@
+// lib/screens/entity_form_screen.dart
 import 'dart:io';
+import 'dart:async'; // Needed for Timeout
 import 'package:flutter/material.dart';
-import 'package:provider/provider.dart';
-import '../models/landmark.dart';
-import '../providers/landmark_provider.dart';
-import '../services/location_service.dart';
-import '../services/image_service.dart';
+import 'package:image_picker/image_picker.dart';
+import 'package:geo_entities_app/models/entity.dart';
+import 'package:geo_entities_app/services/api_service.dart';
+import 'package:geo_entities_app/services/location_service.dart';
+import 'package:image/image.dart' as img;
+import 'package:path_provider/path_provider.dart';
+import 'package:path/path.dart' as path;
+import 'package:google_maps_flutter/google_maps_flutter.dart';
+import 'select_location_screen.dart';
 
-class FormScreen extends StatefulWidget {
-  final Landmark? landmarkToEdit;
+class EntityFormScreen extends StatefulWidget {
+  final Entity? entity;
 
-  const FormScreen({super.key, this.landmarkToEdit});
+  const EntityFormScreen({super.key, this.entity});
 
   @override
-  State<FormScreen> createState() => _FormScreenState();
+  State<EntityFormScreen> createState() => _EntityFormScreenState();
 }
 
-class _FormScreenState extends State<FormScreen> {
+class _EntityFormScreenState extends State<EntityFormScreen> {
   final _formKey = GlobalKey<FormState>();
-  final _titleController = TextEditingController();
-  final _latController = TextEditingController();
-  final _lonController = TextEditingController();
-
-  final LocationService _locationService = LocationService();
-  final ImageService _imageService = ImageService();
-
-  File? _selectedImage;
-  bool _isLoadingLocation = false;
-  bool _isSubmitting = false;
-
-  bool get isEditing => widget.landmarkToEdit != null;
+  final ApiService _apiService = ApiService();
+  late TextEditingController _titleController;
+  late TextEditingController _latController;
+  late TextEditingController _lonController;
+  File? _imageFile;
+  bool _isLoading = false;
 
   @override
   void initState() {
     super.initState();
-    if (isEditing) {
-      _titleController.text = widget.landmarkToEdit!.title;
-      _latController.text = widget.landmarkToEdit!.lat.toString();
-      _lonController.text = widget.landmarkToEdit!.lon.toString();
-    } else {
-      // Auto-detect location for new entries
+    _titleController = TextEditingController(text: widget.entity?.title ?? '');
+    _latController = TextEditingController(text: widget.entity?.lat.toString() ?? '');
+    _lonController = TextEditingController(text: widget.entity?.lon.toString() ?? '');
+    
+    // Auto-detect GPS for new landmarks
+    if (widget.entity == null) {
       _getCurrentLocation();
     }
+  }
+
+  // === FIXED FUNCTION: Includes 4-second Timeout ===
+  Future<void> _getCurrentLocation() async {
+    setState(() => _isLoading = true);
+    
+    try {
+      // Try to get location, but give up after 4 seconds if Emulator is stuck
+      final locationData = await LocationService.getCurrentLocation()
+          .timeout(const Duration(seconds: 4)); 
+
+      if (locationData != null && mounted) {
+        setState(() {
+          _latController.text = locationData.latitude?.toString() ?? '';
+          _lonController.text = locationData.longitude?.toString() ?? '';
+        });
+      }
+    } on TimeoutException catch (_) {
+      // If it takes too long, just stop loading
+      debugPrint("Location timed out");
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('GPS slow. Please enter location manually.')),
+        );
+      }
+    } catch (e) {
+      debugPrint("Error getting location: $e");
+    } finally {
+      // ALWAYS stop loading, no matter what
+      if (mounted) {
+        setState(() => _isLoading = false);
+      }
+    }
+  }
+  // ===============================================
+
+  Future<void> _pickImage() async {
+    final picker = ImagePicker();
+    final pickedFile = await picker.pickImage(
+      source: ImageSource.gallery,
+      maxWidth: 1920,
+      maxHeight: 1080,
+    );
+    
+    if (pickedFile != null) {
+      setState(() {
+        _imageFile = File(pickedFile.path);
+      });
+    }
+  }
+
+  Future<File?> _resizeImage(File originalFile) async {
+    try {
+      final bytes = await originalFile.readAsBytes();
+      final image = img.decodeImage(bytes);
+      if (image == null) return originalFile;
+
+      // Resize to 800x600 as per requirements
+      final resized = img.copyResize(image, width: 800, height: 600);
+      final tempDir = await getTemporaryDirectory();
+      final tempPath = path.join(
+        tempDir.path,
+        'resized_${DateTime.now().millisecondsSinceEpoch}.jpg',
+      );
+      final resizedFile = File(tempPath);
+      await resizedFile.writeAsBytes(img.encodeJpg(resized, quality: 85));
+      return resizedFile;
+    } catch (e) {
+      debugPrint('Image resize error: $e');
+      return originalFile;
+    }
+  }
+
+  Future<void> _submit() async {
+    if (!_formKey.currentState!.validate()) return;
+
+    final latVal = double.tryParse(_latController.text.trim());
+    final lonVal = double.tryParse(_lonController.text.trim());
+    
+    if (latVal == null || lonVal == null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Invalid coordinates')),
+      );
+      return;
+    }
+
+    setState(() => _isLoading = true);
+
+    try {
+      File? submitImage = _imageFile;
+      if (submitImage != null) {
+        submitImage = await _resizeImage(submitImage);
+      }
+
+      final entity = Entity(
+        id: widget.entity?.id,
+        title: _titleController.text.trim(),
+        lat: latVal,
+        lon: lonVal,
+      );
+
+      if (widget.entity == null) {
+        // === CREATE NEW ENTITY ===
+        await _apiService.createEntity(entity, submitImage);
+        
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text('Landmark created successfully!'),
+              backgroundColor: Colors.green,
+            ),
+          );
+          
+          // === FIX STARTS HERE ===
+          // Check if we can "go back". If not (we are on the Tab), just reset the form.
+          if (Navigator.canPop(context)) {
+            Navigator.pop(context, true);
+          } else {
+            // We are on the Tab. Clear the form for the next entry.
+            _titleController.clear();
+            setState(() {
+              _imageFile = null;
+            });
+            // Optional: You could switch to the "Records" tab here if you wanted
+          }
+          // === FIX ENDS HERE ===
+        }
+      } else {
+        // === UPDATE EXISTING ENTITY ===
+        await _apiService.updateEntity(entity, submitImage);
+        
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text('Landmark updated successfully'),
+              backgroundColor: Colors.green,
+            ),
+          );
+          // When editing, we pushed a new screen, so popping is always safe here.
+          Navigator.pop(context, true);
+        }
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Error: $e'),
+            backgroundColor: Colors.red,
+          ),
+        );
+      }
+    } finally {
+      if (mounted) {
+        setState(() => _isLoading = false);
+      }
+    }
+  }
+
+  Future<void> _chooseLocationOnMap() async {
+    LatLng? initial;
+    final lat = double.tryParse(_latController.text);
+    final lon = double.tryParse(_lonController.text);
+    if (lat != null && lon != null) {
+      initial = LatLng(lat, lon);
+    }
+
+    final result = await Navigator.push<LatLng>(
+      context,
+      MaterialPageRoute(
+        builder: (context) => SelectLocationScreen(initialPosition: initial),
+      ),
+    );
+
+    if (result != null) {
+      setState(() {
+        _latController.text = result.latitude.toString();
+        _lonController.text = result.longitude.toString();
+      });
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final isEditing = widget.entity != null;
+    
+    return Scaffold(
+      appBar: AppBar(
+        title: Text(isEditing ? 'Edit Landmark' : 'New Landmark'),
+      ),
+      body: _isLoading && widget.entity == null
+          ? const Center(child: CircularProgressIndicator())
+          : SingleChildScrollView(
+              padding: const EdgeInsets.all(16.0),
+              child: Form(
+                key: _formKey,
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    // Title field
+                    TextFormField(
+                      controller: _titleController,
+                      decoration: InputDecoration(
+                        labelText: 'Title',
+                        hintText: 'Enter landmark name',
+                        prefixIcon: const Icon(Icons.title),
+                        border: OutlineInputBorder(
+                          borderRadius: BorderRadius.circular(12),
+                        ),
+                      ),
+                      validator: (value) =>
+                          (value == null || value.trim().isEmpty)
+                              ? 'Title is required'
+                              : null,
+                    ),
+                    
+                    const SizedBox(height: 16),
+                    
+                    // Latitude field
+                    TextFormField(
+                      controller: _latController,
+                      decoration: InputDecoration(
+                        labelText: 'Latitude',
+                        hintText: '23.6850',
+                        prefixIcon: const Icon(Icons.my_location),
+                        border: OutlineInputBorder(
+                          borderRadius: BorderRadius.circular(12),
+                        ),
+                      ),
+                      keyboardType: const TextInputType.numberWithOptions(
+                        decimal: true,
+                        signed: true,
+                      ),
+                      validator: (value) {
+                        if (value == null || value.trim().isEmpty) {
+                          return 'Latitude is required';
+                        }
+                        if (double.tryParse(value.trim()) == null) {
+                          return 'Enter a valid number';
+                        }
+                        return null;
+                      },
+                    ),
+                    
+                    const SizedBox(height: 16),
+                    
+                    // Longitude field
+                    TextFormField(
+                      controller: _lonController,
+                      decoration: InputDecoration(
+                        labelText: 'Longitude',
+                        hintText: '90.3563',
+                        prefixIcon: const Icon(Icons.location_on),
+                        border: OutlineInputBorder(
+                          borderRadius: BorderRadius.circular(12),
+                        ),
+                      ),
+                      keyboardType: const TextInputType.numberWithOptions(
+                        decimal: true,
+                        signed: true,
+                      ),
+                      validator: (value) {
+                        if (value == null || value.trim().isEmpty) {
+                          return 'Longitude is required';
+                        }
+                        if (double.tryParse(value.trim()) == null) {
+                          return 'Enter a valid number';
+                        }
+                        return null;
+                      },
+                    ),
+                    
+                    const SizedBox(height: 20),
+                    
+                    // Choose location button
+                    OutlinedButton.icon(
+                      onPressed: _chooseLocationOnMap,
+                      icon: const Icon(Icons.map),
+                      label: const Text('Choose location on map'),
+                      style: OutlinedButton.styleFrom(
+                        padding: const EdgeInsets.symmetric(vertical: 12),
+                      ),
+                    ),
+                    
+                    const SizedBox(height: 12),
+                    
+                    // Get current location button
+                    OutlinedButton.icon(
+                      onPressed: _getCurrentLocation,
+                      icon: const Icon(Icons.gps_fixed),
+                      label: const Text('Use current location'),
+                      style: OutlinedButton.styleFrom(
+                        padding: const EdgeInsets.symmetric(vertical: 12),
+                      ),
+                    ),
+                    
+                    const SizedBox(height: 20),
+                    
+                    // Image section
+                    Card(
+                      elevation: 2,
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(12),
+                      ),
+                      child: Padding(
+                        padding: const EdgeInsets.all(16.0),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.stretch,
+                          children: [
+                            const Text(
+                              'Landmark Image',
+                              style: TextStyle(
+                                fontSize: 16,
+                                fontWeight: FontWeight.bold,
+                              ),
+                            ),
+                            const SizedBox(height: 12),
+                            
+                            // Image preview
+                            if (_imageFile != null)
+                              ClipRRect(
+                                borderRadius: BorderRadius.circular(8),
+                                child: Image.file(
+                                  _imageFile!,
+                                  height: 200,
+                                  fit: BoxFit.cover,
+                                ),
+                              )
+                            else if (widget.entity?.image != null)
+                              ClipRRect(
+                                borderRadius: BorderRadius.circular(8),
+                                child: Image.network(
+                                  _apiService.getFullImageUrl(widget.entity!.image),
+                                  height: 200,
+                                  fit: BoxFit.cover,
+                                  errorBuilder: (context, error, stackTrace) =>
+                                      Container(
+                                        height: 200,
+                                        color: Colors.grey[200],
+                                        child: const Center(
+                                          child: Icon(
+                                            Icons.broken_image,
+                                            size: 50,
+                                          ),
+                                        ),
+                                      ),
+                                ),
+                              )
+                            else
+                              Container(
+                                height: 200,
+                                decoration: BoxDecoration(
+                                  color: Colors.grey[200],
+                                  borderRadius: BorderRadius.circular(8),
+                                ),
+                                child: const Center(
+                                  child: Column(
+                                    mainAxisSize: MainAxisSize.min,
+                                    children: [
+                                      Icon(Icons.image, size: 50, color: Colors.grey),
+                                      SizedBox(height: 8),
+                                      Text('No image selected'),
+                                    ],
+                                  ),
+                                ),
+                              ),
+                            
+                            const SizedBox(height: 12),
+                            
+                            ElevatedButton.icon(
+                              onPressed: _pickImage,
+                              icon: const Icon(Icons.photo_library),
+                              label: const Text('Choose Image'),
+                              style: ElevatedButton.styleFrom(
+                                padding: const EdgeInsets.symmetric(vertical: 12),
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                    
+                    const SizedBox(height: 24),
+                    
+                    // Submit button
+                    ElevatedButton(
+                      onPressed: _isLoading && widget.entity != null ? null : _submit,
+                      style: ElevatedButton.styleFrom(
+                        padding: const EdgeInsets.symmetric(vertical: 16),
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(12),
+                        ),
+                      ),
+                      child: _isLoading && widget.entity != null
+                          ? const SizedBox(
+                              height: 20,
+                              width: 20,
+                              child: CircularProgressIndicator(strokeWidth: 2),
+                            )
+                          : Text(
+                              isEditing ? 'Update Landmark' : 'Create Landmark',
+                              style: const TextStyle(fontSize: 16),
+                            ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+    );
   }
 
   @override
@@ -49,385 +457,5 @@ class _FormScreenState extends State<FormScreen> {
     _latController.dispose();
     _lonController.dispose();
     super.dispose();
-  }
-
-  Future<void> _getCurrentLocation() async {
-    setState(() {
-      _isLoadingLocation = true;
-    });
-
-    try {
-      final position = await _locationService.getCurrentLocation();
-      if (position != null && mounted) {
-        setState(() {
-          _latController.text = position.latitude.toStringAsFixed(6);
-          _lonController.text = position.longitude.toStringAsFixed(6);
-        });
-        
-        if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(
-              content: Text('Location detected successfully'),
-              backgroundColor: Colors.green,
-              duration: Duration(seconds: 2),
-            ),
-          );
-        }
-      } else {
-        if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(
-              content: Text('Failed to get location. Please enter manually.'),
-              backgroundColor: Colors.orange,
-            ),
-          );
-        }
-      }
-    } catch (e) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text('Error: $e'),
-            backgroundColor: Colors.red,
-          ),
-        );
-      }
-    } finally {
-      if (mounted) {
-        setState(() {
-          _isLoadingLocation = false;
-        });
-      }
-    }
-  }
-
-  Future<void> _pickImage(bool fromCamera) async {
-    final image = await _imageService.pickImage(fromCamera: fromCamera);
-    if (image != null) {
-      setState(() {
-        _selectedImage = image;
-      });
-    }
-  }
-
-  void _showImageSourceDialog() {
-    showDialog(
-      context: context,
-      builder: (context) => AlertDialog(
-        title: const Text('Select Image Source'),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            ListTile(
-              leading: const Icon(Icons.camera_alt),
-              title: const Text('Camera'),
-              onTap: () {
-                Navigator.pop(context);
-                _pickImage(true);
-              },
-            ),
-            ListTile(
-              leading: const Icon(Icons.photo_library),
-              title: const Text('Gallery'),
-              onTap: () {
-                Navigator.pop(context);
-                _pickImage(false);
-              },
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-
-  Future<void> _submitForm() async {
-    if (!_formKey.currentState!.validate()) {
-      return;
-    }
-
-    setState(() {
-      _isSubmitting = true;
-    });
-
-    final provider = Provider.of<LandmarkProvider>(context, listen: false);
-    
-    try {
-      final title = _titleController.text.trim();
-      final lat = double.parse(_latController.text.trim());
-      final lon = double.parse(_lonController.text.trim());
-
-      bool success;
-      if (isEditing) {
-        success = await provider.updateLandmark(
-          id: widget.landmarkToEdit!.id!,
-          title: title,
-          lat: lat,
-          lon: lon,
-          imageFile: _selectedImage,
-        );
-      } else {
-        success = await provider.createLandmark(
-          title: title,
-          lat: lat,
-          lon: lon,
-          imageFile: _selectedImage,
-        );
-      }
-
-      if (mounted) {
-        if (success) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(
-              content: Text(
-                isEditing
-                    ? 'Landmark updated successfully'
-                    : 'Landmark created successfully',
-              ),
-              backgroundColor: Colors.green,
-            ),
-          );
-          
-          // Clear form if creating new
-          if (!isEditing) {
-            _titleController.clear();
-            _latController.clear();
-            _lonController.clear();
-            setState(() {
-              _selectedImage = null;
-            });
-            _getCurrentLocation();
-          } else {
-            Navigator.pop(context);
-          }
-        } else {
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(
-              content: Text(provider.error ?? 'Operation failed'),
-              backgroundColor: Colors.red,
-            ),
-          );
-        }
-      }
-    } catch (e) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text('Error: $e'),
-            backgroundColor: Colors.red,
-          ),
-        );
-      }
-    } finally {
-      if (mounted) {
-        setState(() {
-          _isSubmitting = false;
-        });
-      }
-    }
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return Scaffold(
-      appBar: AppBar(
-        title: Text(isEditing ? 'Edit Landmark' : 'New Landmark'),
-        automaticallyImplyLeading: isEditing,
-      ),
-      body: SingleChildScrollView(
-        padding: const EdgeInsets.all(16),
-        child: Form(
-          key: _formKey,
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              // Image selector
-              GestureDetector(
-                onTap: _showImageSourceDialog,
-                child: Container(
-                  height: 200,
-                  decoration: BoxDecoration(
-                    color: Colors.grey[200],
-                    borderRadius: BorderRadius.circular(12),
-                    border: Border.all(color: Colors.grey[400]!),
-                  ),
-                  child: _selectedImage != null
-                      ? ClipRRect(
-                          borderRadius: BorderRadius.circular(12),
-                          child: Image.file(
-                            _selectedImage!,
-                            fit: BoxFit.cover,
-                          ),
-                        )
-                      : (isEditing && widget.landmarkToEdit!.fullImageUrl != null)
-                          ? ClipRRect(
-                              borderRadius: BorderRadius.circular(12),
-                              child: Image.network(
-                                widget.landmarkToEdit!.fullImageUrl!,
-                                fit: BoxFit.cover,
-                                errorBuilder: (context, error, stackTrace) {
-                                  return _buildImagePlaceholder();
-                                },
-                              ),
-                            )
-                          : _buildImagePlaceholder(),
-                ),
-              ),
-              
-              const SizedBox(height: 8),
-              
-              Text(
-                'Tap to select image (will be resized to 800x600)',
-                style: TextStyle(
-                  fontSize: 12,
-                  color: Colors.grey[600],
-                  fontStyle: FontStyle.italic,
-                ),
-                textAlign: TextAlign.center,
-              ),
-              
-              const SizedBox(height: 24),
-              
-              // Title field
-              TextFormField(
-                controller: _titleController,
-                decoration: const InputDecoration(
-                  labelText: 'Title',
-                  hintText: 'Enter landmark title',
-                  prefixIcon: Icon(Icons.title),
-                ),
-                validator: (value) {
-                  if (value == null || value.trim().isEmpty) {
-                    return 'Please enter a title';
-                  }
-                  return null;
-                },
-              ),
-              
-              const SizedBox(height: 16),
-              
-              // Latitude field
-              TextFormField(
-                controller: _latController,
-                decoration: const InputDecoration(
-                  labelText: 'Latitude',
-                  hintText: 'Enter latitude',
-                  prefixIcon: Icon(Icons.my_location),
-                ),
-                keyboardType: const TextInputType.numberWithOptions(decimal: true),
-                validator: (value) {
-                  if (value == null || value.trim().isEmpty) {
-                    return 'Please enter latitude';
-                  }
-                  final lat = double.tryParse(value.trim());
-                  if (lat == null) {
-                    return 'Please enter a valid number';
-                  }
-                  if (lat < -90 || lat > 90) {
-                    return 'Latitude must be between -90 and 90';
-                  }
-                  return null;
-                },
-              ),
-              
-              const SizedBox(height: 16),
-              
-              // Longitude field
-              TextFormField(
-                controller: _lonController,
-                decoration: const InputDecoration(
-                  labelText: 'Longitude',
-                  hintText: 'Enter longitude',
-                  prefixIcon: Icon(Icons.my_location),
-                ),
-                keyboardType: const TextInputType.numberWithOptions(decimal: true),
-                validator: (value) {
-                  if (value == null || value.trim().isEmpty) {
-                    return 'Please enter longitude';
-                  }
-                  final lon = double.tryParse(value.trim());
-                  if (lon == null) {
-                    return 'Please enter a valid number';
-                  }
-                  if (lon < -180 || lon > 180) {
-                    return 'Longitude must be between -180 and 180';
-                  }
-                  return null;
-                },
-              ),
-              
-              const SizedBox(height: 16),
-              
-              // Get current location button
-              if (!isEditing)
-                OutlinedButton.icon(
-                  onPressed: _isLoadingLocation ? null : _getCurrentLocation,
-                  icon: _isLoadingLocation
-                      ? const SizedBox(
-                          width: 20,
-                          height: 20,
-                          child: CircularProgressIndicator(strokeWidth: 2),
-                        )
-                      : const Icon(Icons.gps_fixed),
-                  label: Text(_isLoadingLocation
-                      ? 'Detecting Location...'
-                      : 'Use Current Location'),
-                  style: OutlinedButton.styleFrom(
-                    padding: const EdgeInsets.symmetric(vertical: 12),
-                  ),
-                ),
-              
-              const SizedBox(height: 24),
-              
-              // Submit button
-              ElevatedButton(
-                onPressed: _isSubmitting ? null : _submitForm,
-                style: ElevatedButton.styleFrom(
-                  padding: const EdgeInsets.symmetric(vertical: 16),
-                ),
-                child: _isSubmitting
-                    ? const SizedBox(
-                        height: 20,
-                        width: 20,
-                        child: CircularProgressIndicator(
-                          strokeWidth: 2,
-                          valueColor: AlwaysStoppedAnimation<Color>(Colors.white),
-                        ),
-                      )
-                    : Text(
-                        isEditing ? 'Update Landmark' : 'Create Landmark',
-                        style: const TextStyle(fontSize: 16),
-                      ),
-              ),
-              
-              // Cancel button (only when editing)
-              if (isEditing) ...[
-                const SizedBox(height: 12),
-                OutlinedButton(
-                  onPressed: () => Navigator.pop(context),
-                  style: OutlinedButton.styleFrom(
-                    padding: const EdgeInsets.symmetric(vertical: 16),
-                  ),
-                  child: const Text('Cancel', style: TextStyle(fontSize: 16)),
-                ),
-              ],
-            ],
-          ),
-        ),
-      ),
-    );
-  }
-
-  Widget _buildImagePlaceholder() {
-    return Column(
-      mainAxisAlignment: MainAxisAlignment.center,
-      children: [
-        Icon(Icons.add_photo_alternate, size: 60, color: Colors.grey[400]),
-        const SizedBox(height: 8),
-        Text(
-          'Tap to add image',
-          style: TextStyle(color: Colors.grey[600]),
-        ),
-      ],
-    );
   }
 }

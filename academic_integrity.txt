@@ -1,0 +1,29 @@
+## Academic Integrity Statement
+
+Student Name: M. A. Abdullahis Sany
+Student ID: 22101149
+
+I hereby declare that this project is my own work, developed for the CSE 489 Midterm Lab Exam. Below is a detailed breakdown of the development process and resources used:
+
+### A. Code Ownership & Core Logic
+* Architecture: I designed the project structure, separating code into `models`, `screens`, and `services` to ensure modularity.
+* UI Implementation: I built all screen layouts (Map, List, Form) using Flutter widgets (`Stack`, `BottomNavigationBar`, `FloatingActionButton`, `Card`).
+* State Management: I implemented the local state logic using `setState` to handle UI updates for loading states, markers, and form validation.
+* API Integration: I wrote the `ApiService` class to handle HTTP methods (GET, POST, PUT, DELETE) and JSON parsing logic in `Entity.fromJson`.
+
+### B. Use of AI & Generative Tools
+I used AI tools (ChatGPT/Gemini) primarily for debugging and configuration support. Specific instances include:
+1.  Build Configuration:** AI assisted in resolving a "Dependency Conflict" in `android/app/build.gradle.kts` regarding the `androidx.activity` version mismatch.
+2.  Bug Fixing:
+    * Navigation Crash: AI helped identify and fix a "Black Screen" bug by implementing `Navigator.canPop(context)` checks in the form submission logic.
+    * Image Uploads: AI suggested using `http_parser` and `MediaType('image', 'jpeg')` to resolve a server-side "Invalid File Type" error during multipart uploads.
+    * Emulator GPS: AI suggested adding a `timeout` to the location service call to prevent the app from freezing when the Android Emulator's GPS is unresponsive.
+
+### C. External Resources & Documentation
+The following official documentation and packages were consulted:
+* Flutter Documentation: For standard widget usage and navigation.
+* Pub.dev Packages:
+    * `Maps_flutter`: For map rendering and marker management.
+    * `http` & `http_parser`: For REST API communication and handling MIME types.
+    * `location`: For accessing device GPS hardware.
+    * `image_picker`: For gallery access.
